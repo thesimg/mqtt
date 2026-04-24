@@ -78,7 +78,8 @@ def on_message(client, userdata, msg):
     # if msg.topic == "timer":
     #     romi_timer_channel.log({"timestamp": time.time()})
     #     print("romi timer elapsed, logged to Foxglove @ " + str(time.time()))
-    foxglove.log(msg.topic, {"payload": str(msg.payload), "qos": msg.qos, "timestamp": time.time()})
+    cleaned_payload = str(msg.payload)[2:-1]
+    foxglove.log(msg.topic, {"payload": cleaned_payload, "qos": msg.qos, "timestamp": time.time()})
 # using MQTT version 5 here, for 3.1.1: MQTTv311, 3.1: MQTTv31
 # userdata is user defined data of any type, updated by user_data_set()
 # client_id is the given name of the client
