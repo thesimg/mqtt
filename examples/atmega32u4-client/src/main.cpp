@@ -76,5 +76,6 @@ void loop()
     while(msgCountToSend)
     {
         sendMessage("button/time", String(currTime + msgCountToSend--));
+        Serial.print("message");
     }
 }
