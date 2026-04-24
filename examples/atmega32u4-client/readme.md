@@ -4,7 +4,7 @@ This example is paired with the `ESP32-wifi-uart` example to allow you to connec
 
 **Note that level-shifting is required or you will damage your ESP32.**
 
-Connect `TXD1` on the 32U4 to `RX2` on the ESP32. **Level-shifting is required!** If you want to receive messages on the 32U4, you will need to connect `TX2` on the ESP32 to `RXD1` on the 32U4.
+Connect `TXD1` on the 32U4 to `RX2 (16)` on the ESP32. **Level-shifting is required!** If you want to receive messages on the 32U4, you will need to connect `TX2 (17)` on the ESP32 to `RXD1` on the 32U4.
 
 To send a message, use the `sendMessage()` function. See the code for the parameters.
 

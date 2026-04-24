@@ -24,7 +24,9 @@ foxglove.start_server()
 # custom_message_channel = Channel("/custom", message_encoding="json")
 # custom_message_channel.log({"hello": "world"})
 
-button_channel = foxglove.Channel("/button0", message_encoding="json")
+esp_button_channel = foxglove.Channel("/button0", message_encoding="json")
+romi_button_channel = foxglove.Channel("/button", message_encoding="json")
+romi_timer_channel = foxglove.Channel("/timer", message_encoding="json")
 # button_channel.log({"pressed": True, "timestamp": time.time()})
 
 ######### MQTT
@@ -44,9 +46,16 @@ def on_subscribe(client, userdata, mid, granted_qos, properties=None):
 # print message, useful for checking if it was successful
 def on_message(client, userdata, msg):
     print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
-    if msg.topic == "button0":
-        button_channel.log({"pressed": True, "timestamp": time.time()})
-        print("button0 pressed, logged to Foxglove @ " + str(time.time()))
+    # if msg.topic == "button0":
+    #     esp_button_channel.log({"pressed": True, "timestamp": time.time()})
+    #     print("button0 pressed, logged to Foxglove @ " + str(time.time()))
+    # if msg.topic == "button":
+    #     romi_button_channel.log({"pressed": True, "timestamp": time.time()})
+    #     print("romi button pressed, logged to Foxglove @ " + str(time.time()))
+    # if msg.topic == "timer":
+    #     romi_timer_channel.log({"timestamp": time.time()})
+    #     print("romi timer elapsed, logged to Foxglove @ " + str(time.time()))
+    foxglove.log(msg.topic, {"payload": str(msg.payload), "qos": msg.qos, "timestamp": time.time()})
 
 # using MQTT version 5 here, for 3.1.1: MQTTv311, 3.1: MQTTv31
 # userdata is user defined data of any type, updated by user_data_set()
@@ -68,7 +77,8 @@ client.on_publish = on_publish
 
 # subscribe to all topics of encyclopedia by using the wildcard "#"
 # client.subscribe("encyclopedia/#", qos=1)
-client.subscribe("button0/#", qos=1)
+# client.subscribe("button0/#", qos=1)
+client.subscribe("#", qos=1)
 
 # a single publish, this can also be done in loops, etc.
 # client.publish("encyclopedia/temperature", payload="hot", qos=1)
