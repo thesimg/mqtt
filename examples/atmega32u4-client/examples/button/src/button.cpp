@@ -18,7 +18,7 @@ void setup()
 
     Serial.println("/setup()");
 
-    timer.start(20);
+    timer.start(50);
 }
 
 /**
@@ -28,11 +28,12 @@ void setup()
  * */
 void loop() 
 {
-    static uint32_t lastSend = 0;
-    uint32_t currTime = millis();
-    if(currTime - lastSend >= 5000) //send every five seconds
+    static unsigned long lastSend = 0;
+    unsigned long currTime = millis();
+    if(currTime - lastSend >= 100) //send every five seconds
     {
         lastSend = currTime;
+        
         espLogger.log(espLogger.ENCODER_L, (int) lastSend);
     }
     

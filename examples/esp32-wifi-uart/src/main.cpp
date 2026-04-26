@@ -5,6 +5,15 @@
 
 // use the button for forcing a message (for testing)
 Button bootButton(0);
+int flag = 0;
+unsigned long timeSinceLastFlag = 0;
+
+const int QUEUE_SIZE = 8;
+String topicQueue[QUEUE_SIZE];
+String payloadQueue[QUEUE_SIZE];
+unsigned int lengthQueue[QUEUE_SIZE];
+int readindex = 0;
+int previndex = 0;
 
 /**
  * subscriptions is passed to the connection method so that the client will
@@ -88,23 +97,13 @@ bool publishMQTT(String& str)
  * */
 void callback(char* topic, byte *payload, unsigned int length) 
 {
-    // These two lines can be commented out; they are used for testing and don't affect functionality
-    Serial.print("Full topic: ");
-    Serial.println(topic);
+    int nextindex = (previndex + 1) % QUEUE_SIZE;
+    if (nextindex == readindex) return; // full, drop
 
-    String strTopic(topic);
-
-    // This prints to the Serial monitor
-    Serial.print(strTopic.substring(strTopic.indexOf('/') + 1));
-    Serial.print(':');  
-    Serial.write(payload, length);
-    Serial.println();
-
-    // This prints to Serial2, which can be connected to another uC
-    Serial2.print(strTopic.substring(strTopic.indexOf('/') + 1));
-    Serial2.print(':');  
-    Serial2.write(payload, length);
-    Serial2.println();
+    topicQueue[previndex] = String(topic);
+    payloadQueue[previndex] = String((char*)payload).substring(0, length);
+    lengthQueue[previndex] = length;
+    previndex = nextindex;
 }
 
 void setup() 
@@ -141,5 +140,30 @@ void loop()
     if(checkSerial2()) publishMQTT(rx2String);
 
     // For testing connectivity:
-    if(bootButton.checkButtonPress()) {String bStr("button0:pressed"); publishMQTT(bStr);}    
+    if(bootButton.checkButtonPress()) {String bStr("button0:pressed"); publishMQTT(bStr);}  
+    
+    if (readindex != previndex && (millis() - timeSinceLastFlag) > 20) {
+        timeSinceLastFlag = millis();
+
+        String& strTopic = topicQueue[readindex];
+        String& strPayload = payloadQueue[readindex];
+        unsigned int& length = lengthQueue[readindex];
+        readindex = (readindex + 1) % QUEUE_SIZE;
+
+        // These two lines can be commented out; they are used for testing and don't affect functionality
+        Serial.print("Full topic: ");
+        Serial.println(strTopic);
+
+        // This prints to the Serial monitor
+        Serial.print(strTopic.substring(strTopic.indexOf('/') + 1));
+        Serial.print(':');  
+        Serial.write(strPayload.c_str(), length);
+        Serial.println();
+
+        // This prints to Serial2, which can be connected to another uC
+        Serial2.print(strTopic.substring(strTopic.indexOf('/') + 1));
+        Serial2.print(':');  
+        Serial2.write(strPayload.c_str(), length);
+        Serial2.println();
+    }
 }

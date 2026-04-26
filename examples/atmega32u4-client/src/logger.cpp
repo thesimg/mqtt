@@ -55,9 +55,9 @@ void Logger::update() {
             Serial1.print(':');
             Serial1.println(queue.slots[queue.readIndex]);
 
-            Serial.print(nextQueueToSend);
-            Serial.print(':');
-            Serial.println(queue.slots[queue.readIndex]);
+            // Serial.print(nextQueueToSend);
+            // Serial.print(':');
+            // Serial.println(queue.slots[queue.readIndex]);
 
             // set queue to be empty and increses queue index
             queue.slots[queue.readIndex] = "";

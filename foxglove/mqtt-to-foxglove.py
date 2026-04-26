@@ -1,111 +1,356 @@
-#
-# Copyright 2021 HiveMQ GmbH
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-import time
+# ----- Imports -------------------------
+import json
+import signal
 import ssl
-import paho.mqtt.client as paho
-import paho.mqtt.publish as pub
+import sys
+import time
+from typing import Any
+from pathlib import Path
+import logging
+import queue
+
 import foxglove
+import paho.mqtt.client as paho
+from foxglove import Channel, Schema
+from foxglove.websocket import Capability, Client, ServerListener
 
-from foxglove.websocket import (Capability, ServerListener)
-mqttClient = paho.Client(client_id="", userdata=None, protocol=paho.MQTTv5)
+from parser import parse_loged_fields
 
-######### FOXGLOVE
-class ExampleListener(ServerListener):
-    def on_message_data(
-        self,
-        client: Client,
-        client_channel_id: int,
-        data: bytes,
-    ) -> None:
-        print(f"Message from client {client.id} on channel {client_channel_id}")
-        print(f"Data: {data!r}")
-        d = eval(str(data)[2:-1])
-        print(d["linear"]["x"])
-        mqttClient.publish("/test", d["linear"]["x"])
-
-listener = ExampleListener()
-
-server = foxglove.start_server(
-  capabilities=[Capability.ClientPublish],
-  supported_encodings=["json"],
-  server_listener=listener,
+# ----- Logger -------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
 )
 
-# custom_message_channel = Channel("/custom", message_encoding="json")
-# custom_message_channel.log({"hello": "world"})
+mqtt_log = logging.getLogger("mqtt")
+fox_log = logging.getLogger("foxglove")
+bridge_log = logging.getLogger("bridge")
 
-# esp_button_channel = foxglove.Channel("/button0", message_encoding="json")
-# romi_button_channel = foxglove.Channel("/button", message_encoding="json")
-# romi_timer_channel = foxglove.Channel("/timer", message_encoding="json")
-# button_channel.log({"pressed": True, "timestamp": time.time()})
+# ----- Config -------------------------
+MQTT_HOST = "19e34349420d4b38911b39f4bda2e3ff.s1.eu.hivemq.cloud"
+MQTT_PORT = 8883
+MQTT_USER = "RBE2002macbook"
+MQTT_PASS = "RBE2002macbook"
+MQTT_SUB_TOPIC = "#"
 
-######### MQTT
+ROMI_CMD_TOPIC = "/cmd"
 
-# setting callbacks for different events to see if it works, print the message etc.
+ROMI_HEADER_PATH = Path(__file__).parent / "../examples/atmega32u4-client/include/logger.h"
+ROMI_FIELDS = parse_loged_fields(ROMI_HEADER_PATH)
+
+ROMI_FIELD_IDS: dict[str, int] = {v: k for k, v in ROMI_FIELDS.items()}
+
+bridge_log.info(f"Logged Fields {ROMI_FIELDS}")
+
+messageQueue: queue.Queue = queue.Queue()
+
+# ----- Romi message parsing -------------------------
+def parse_romi_message(field: int, payload: str) -> dict[str, Any] | None:
+    parts = payload.split(":")
+    if len(parts) != 2:
+        bridge_log.error(f"Payload is wrong length (got {len(parts)} parts): raw={payload!r} parts={parts}")
+        return None
+
+    value_str, millis_str = parts
+    try:
+        device_millis = int(millis_str)
+    except ValueError:
+        bridge_log.error("Mills is not int")
+        return None
+
+    try:
+        value: int | float = int(value_str)
+    except ValueError:
+        try:
+            value = float(value_str)
+        except ValueError:
+            bridge_log.error("value not int or float")
+            return None
+
+    return {
+        "field_id": field,
+        "field_name": ROMI_FIELDS.get(field, f"field_{field}"),
+        "value": value,
+        "device_millis": device_millis,
+    }
+
+def decode_payload(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.hex()
+
+# ----- Schemas -------------------------
+ROMI_TELEMETRY_SCHEMA = Schema(
+    name="RomiTelemetry",
+    encoding="jsonschema",
+    data=json.dumps({
+        "type": "object",
+        "properties": {
+            "timestamp": {
+                "type": "object",
+                "title": "time",
+                "properties": {
+                    "sec": {"type": "integer"},
+                    "nsec": {"type": "integer"},
+                },
+            },
+            "value": {"type": "number"},
+            "device_millis": {"type": "integer"},
+        },
+    }).encode("utf-8"),
+)
+
+RAW_PAYLOAD_SCHEMA = Schema(
+    name="RawMqttMessage",
+    encoding="jsonschema",
+    data=json.dumps({
+        "type": "object",
+        "properties": {
+            "timestamp": {
+                "type": "object",
+                "title": "time",
+                "properties": {
+                    "sec": {"type": "integer"},
+                    "nsec": {"type": "integer"},
+                },
+            },
+            "payload": {"type": "string"},
+            "qos": {"type": "integer"},
+        },
+    }).encode("utf-8"),
+)
+
+ROMI_FIELD_INPUT_SCHEMA = Schema(
+    name="RomiFieldInput",
+    encoding="jsonschema",
+    data=json.dumps({
+        "type": "object",
+        "properties": {
+            "field_id": {"type": "integer"},
+            "value": {"type": "number"},
+        },
+        "required": ["field_id", "value"],
+    }).encode("utf-8"),
+)
+
+ROMI_JOYSTICK_SCHEMA = Schema(
+    name="RomiJoystick",
+    encoding="jsonschema",
+    data=json.dumps({
+        "type": "object",
+        "properties": {
+            "linear":  {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}},
+            "angular": {"type": "object", "properties": {"z": {"type": "number"}}},
+        },
+    }).encode("utf-8"),
+)
+
+# ----- Timestamp tracking -------------------------
+RESTART_THRESHOLD_MS = 2_000
+
+_millis_epoch_ns: int | None = None
+_last_device_millis: int = 0
+
+def _reset_romi_session() -> None:
+    global _millis_epoch_ns, _last_device_millis
+    bridge_log.info("Romi session reset: clearing Foxglove channels")
+    _channels.clear()
+    _millis_epoch_ns = None
+    _last_device_millis = 0
+
+def device_time_ns(device_millis: int) -> int:
+    global _millis_epoch_ns, _last_device_millis
+
+    if _millis_epoch_ns is not None and device_millis < _last_device_millis - RESTART_THRESHOLD_MS:
+        bridge_log.info(
+            f"Romi restart detected (millis {_last_device_millis} -> {device_millis})"
+        )
+        _reset_romi_session()
+
+    if _millis_epoch_ns is None:
+        _millis_epoch_ns = time.time_ns() - device_millis * 1_000_000
+
+    _last_device_millis = device_millis
+    return _millis_epoch_ns + device_millis * 1_000_000
+
+def ns_to_timestamp(ns: int) -> dict[str, int]:
+    return {"sec": ns // 1_000_000_000, "nsec": ns % 1_000_000_000}
+
+def now_timestamp() -> dict[str, int]:
+    return ns_to_timestamp(time.time_ns())
+
+# ----- Channel registry -------------------------
+_channels: dict[str, Channel] = {}
+
+def channel_for(topic: str, schema: Schema) -> Channel:
+    if topic not in _channels:
+        _channels[topic] = Channel(topic, message_encoding="json", schema=schema)
+    return _channels[topic]
+
+# ----- Foxglove → MQTT listener -------------------------
+class RomiInputListener(ServerListener):
+    def __init__(self) -> None:
+        self._advertised: dict[tuple[int, int], str] = {}
+        self.lastTime = 0
+
+    def on_client_advertise(self, client: Client, channel: Any) -> None:
+        self._advertised[(client.id, channel.id)] = channel.topic
+        fox_log.info(f"client {client.id} advertised channel '{channel.topic}' (id={channel.id})")
+
+    def on_client_unadvertise(self, client: Client, channel_id: int) -> None:
+        self._advertised.pop((client.id, channel_id), None)
+
+    def on_message_data(self, client: Client, client_channel_id: int, data: bytes) -> None:
+        topic = self._advertised.get((client.id, client_channel_id), "")
+
+        if (time.time_ns() - self.lastTime) > (1000000 * 100):
+            self.lastTime = time.time_ns()
+            try:
+                msg = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                fox_log.warning(f"could not parse client message on '{topic}': {e}")
+                return
+            # fox_log.info(msg)
+            # Generic per-field slider: {"field_id": int, "value": number}
+            if topic.startswith("/foxglove/input"):
+                field_id = msg.get("field_id")
+                value = msg.get("value")
+                if field_id is None or value is None:
+                    fox_log.warning(f"RomiFieldInput missing field_id or value: {msg!r}")
+                    return
+                payload = f"{field_id}:{value}"
+                # if messageQueue.full():
+                #     messageQueue.get_nowait()
+                mqtt_client.publish(ROMI_CMD_TOPIC, payload)
+                mqtt_log.info(ROMI_CMD_TOPIC, payload)
+
+            # Joystick / teleop: {"linear": {"x": float, "y": float}, "angular": {"z": float}}
+            elif topic == "/foxglove/joystick":
+                # print("here")
+                # print(msg["axes"])
+                try:
+                    lx = float(msg["axes"][1])
+                    ly = float(msg["axes"][0])
+                except (KeyError, TypeError, ValueError) as e:
+                    fox_log.warning(f"bad joystick message: {e} | {msg!r}")
+                    return
+                # Publish each axis separately so the Romi can handle them individually.
+                # Format: field_name:value  (Romi maps these by name or you can switch to IDs)
+                for name, val in [("x", lx), ("y", ly)]:
+                    # if messageQueue.full():
+                    #     messageQueue.get_nowait()
+                    #     messageQueue.get_nowait()
+                    mqtt_client.publish(ROMI_CMD_TOPIC, f"{name}:{val:.4f}")
+                    mqtt_log.info(f"{ROMI_CMD_TOPIC} {name}:{val:.4f}")
+                    # print((ROMI_CMD_TOPIC, f"{name}:{val:.4f}"))
+
+            else:
+                fox_log.debug(f"unhandled client topic '{topic}': {msg!r}")
+
+
+# ----- MQTT callbacks -------------------------
 def on_connect(client, userdata, flags, rc, properties=None):
-    print("CONNACK received with code %s." % rc)
+    if rc == 0:
+        mqtt_log.info("connected")
+        client.subscribe(MQTT_SUB_TOPIC, qos=1)
+    else:
+        mqtt_log.warning(f"connect failed, rc={rc}")
 
-# with this callback you can see if your publish was successful
-def on_publish(client, userdata, mid, properties=None):
-    print("mid: " + str(mid))
+def on_disconnect(client, userdata, rc, properties=None):
+    if rc == 0:
+        mqtt_log.info("disconnected")
+    else:
+        mqtt_log.warning(f"unexpected disconnect (rc={rc}), reconnecting...")
 
-# print which topic was subscribed to
 def on_subscribe(client, userdata, mid, granted_qos, properties=None):
-    print("Subscribed: " + str(mid) + " " + str(granted_qos))
+    mqtt_log.debug(f"subscribed mid={mid} qos={granted_qos}")
 
-# print message, useful for checking if it was successful
+def on_publish(client, userdata, mid, properties=None):
+    mqtt_log.debug(f"published mid={mid}")
+
 def on_message(client, userdata, msg):
-    print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
-    # if msg.topic == "button0":
-    #     esp_button_channel.log({"pressed": True, "timestamp": time.time()})
-    #     print("button0 pressed, logged to Foxglove @ " + str(time.time()))
-    # if msg.topic == "button":
-    #     romi_button_channel.log({"pressed": True, "timestamp": time.time()})
-    #     print("romi button pressed, logged to Foxglove @ " + str(time.time()))
-    # if msg.topic == "timer":
-    #     romi_timer_channel.log({"timestamp": time.time()})
-    #     print("romi timer elapsed, logged to Foxglove @ " + str(time.time()))
-    cleaned_payload = str(msg.payload)[2:-1]
-    foxglove.log(msg.topic, {"payload": cleaned_payload, "qos": msg.qos, "timestamp": time.time()})
-# using MQTT version 5 here, for 3.1.1: MQTTv311, 3.1: MQTTv31
-# userdata is user defined data of any type, updated by user_data_set()
-# client_id is the given name of the client
+    if msg.topic == ROMI_CMD_TOPIC:
+        return
 
-mqttClient.on_connect = on_connect
+    payload_str = decode_payload(msg.payload)
+    
+    parsed = parse_romi_message(msg.topic, payload_str)
+    if parsed is not None:
+        log_ns = device_time_ns(parsed["device_millis"])
+        ts = ns_to_timestamp(log_ns)
+        field_topic = f"/romi/{parsed['field_name']}"
+        channel_for(field_topic, ROMI_TELEMETRY_SCHEMA).log(
+            {
+                "timestamp": ts,
+                "value": parsed["value"],
+                "device_millis": parsed["device_millis"],
+            },
+            log_time=log_ns,
+        )
+        return
 
-# enable TLS for secure connection
-mqttClient.tls_set(tls_version=ssl.PROTOCOL_TLS) # mqtt.client.ssl.PROTOCOL_TLS
-# set username and password
-mqttClient.username_pw_set("RBE2002macbook", "RBE2002macbook")
-# connect to HiveMQ Cloud on port 8883 (default for MQTT)
-mqttClient.connect("19e34349420d4b38911b39f4bda2e3ff.s1.eu.hivemq.cloud", 8883)
+    # Fallback: raw payload on a channel matching the MQTT topic
+    channel_for(msg.topic, RAW_PAYLOAD_SCHEMA).log(
+        {
+            "timestamp": now_timestamp(),
+            "payload": payload_str,
+            "qos": msg.qos,
+        }
+    )
 
-# setting callbacks, use separate functions like above for better visibility
-mqttClient.on_subscribe = on_subscribe
-mqttClient.on_message = on_message
-mqttClient.on_publish = on_publish
+# ----- Shutdown -------------------------
+def shutdown(signum=None, frame=None):
+    bridge_log.info("shutting down...")
+    try:
+        mqtt_client.disconnect()
+        mqtt_client.loop_stop()
+    except Exception as e:
+        bridge_log.warning(f"mqtt shutdown error: {e}")
+    try:
+        server.stop()
+    except Exception as e:
+        bridge_log.warning(f"foxglove shutdown error: {e}")
+    sys.exit(0)
 
-# subscribe to all topics of encyclopedia by using the wildcard "#"
-# client.subscribe("encyclopedia/#", qos=1)
-# client.subscribe("button0/#", qos=1)
-mqttClient.subscribe("#", qos=1)
+# ----- Setup -------------------------
+mqtt_client = paho.Client(client_id="romi-mqtt-bridge", userdata=None, protocol=paho.MQTTv5)
 
-# a single publish, this can also be done in loops, etc.
-# client.publish("encyclopedia/temperature", payload="hot", qos=1)
+mqtt_client.on_connect = on_connect
+mqtt_client.on_disconnect = on_disconnect
+mqtt_client.on_subscribe = on_subscribe
+mqtt_client.on_publish = on_publish
+mqtt_client.on_message = on_message
 
-# loop_forever for simplicity, here you need to stop the loop manually
-# you can also use loop_start and loop_stop
-mqttClient.loop_forever()
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=60)
+mqtt_client.tls_set(tls_version=ssl.PROTOCOL_TLS)
+mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
+
+server = foxglove.start_server(
+    capabilities=[Capability.ClientPublish],
+    supported_encodings=["json"],
+    server_listener=RomiInputListener(),
+)
+
+# ----- Signal handling -------------------------
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
+
+# ----- Run -------------------------
+mqtt_client.connect_async(MQTT_HOST, MQTT_PORT)
+mqtt_client.loop_forever(retry_first_connection=True)
+# mqtt_client.loop_start()
+
+# lastTime = 0
+# while True:
+#     if (time.time_ns() - lastTime) > (1000000 * 100):
+#         lastTime = time.time_ns()
+#         if not messageQueue.empty():
+#             if (data := messageQueue.get_nowait()):
+#                 mqtt_client.publish(*data)
+#                 mqtt_log.info(f"Loged {data}")
+#         if messageQueue.full():
+#             print("QUEUE FULL")
+            
+
