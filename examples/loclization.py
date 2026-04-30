@@ -1,6 +1,7 @@
 import sensor
 import time
 import math
+from machine import LED
 
 sensor.reset()
 sensor.set_pixformat(sensor.RGB565) #RGB565 #GRAYSCALE
@@ -13,7 +14,7 @@ clock = time.clock()
 
 
 # ------------------------------ Consts ------------------------------------------
-scale = 2
+scale = 1
 f_x = (2.8 / 3.984) * 160 * scale  # find_apriltags defaults to this if not set
 f_y = (2.8 / 2.952) * 120 * scale  # find_apriltags defaults to this if not set
 c_x = 160 * 0.5 * scale  # find_apriltags defaults to this if not set (the image.w * 0.5)
@@ -23,6 +24,7 @@ c_y = 120 * 0.5 * scale  # find_apriltags defaults to this if not set (the image
 TAG_SIZE_MM = 35
 
 
+# ------------------------------ Functions ------------------------------------------
 def normalize(angle, size=math.pi):
     while angle > size:
         angle -= 2 * size
@@ -53,6 +55,7 @@ def cam_to_robot(x_cam, z_cam, ry_cam):
     return x, y, ry
 
 
+# ------------------------------ Tags ------------------------------------------
 class Tag:
     def __init__(self, alpha=0.15, timeout_ms=100):
         # Moving Avrage
@@ -147,6 +150,7 @@ class Tag:
         )
 
 
+# ------------------------------ Localization ------------------------------------------
 class Localization:
     def __init__(self, tags):
         self.tags = tags
@@ -204,20 +208,101 @@ class Localization:
         self.position = (x, y)
 
 
-tag2 = Tag()
-tag4 = Tag()
+def get_tags_with_pose(tags):
+    ret_tags = {}
+    for key, value in tags.items():
+        if isinstance(value, dict) and "pos" in value:
+            ret_tags[key] = value
+    return ret_tags
 
 
+class LED_Controll:
+    class Color(Enum):
+        # Red Green Blue
+        OFF =      (False, False, False)
+        RED =      (True,  False, False)
+        GREEN =    (False, True,  False)
+        BLUE =     (False, False, True)
+        YELLOW =   (True,  True,  False)
+        MEGENTA =  (True,  False, True)
+        CYAN =     (False, True,  True)
+        WIGHT =    (True,  True,  True)
+
+    def __init__(self):
+        self.bits = []
+
+        self.last_time = millis()
+        self.toggle_time = 250
+
+        self.bit_index = 0 
+        
+        self.red_led = LED("LED_RED")
+        self.green_led = LED("LED_GREEN")
+        self.blue_led = LED("LED_BLUE")
+
+    def _set_color(color: LED_Controll.Color):
+        match (color):
+            case color.OFF:
+                self.red_led.off()
+                self.green_led.off()
+                self.blue_led.off()
+            case color.RED:
+                self.red_led.on()
+            case color.GREEN:
+                self.green_led.on()
+            case color.BLUE:
+                self.blue_led.on()
+            case color.YELLOW:
+                self.blue_led.on()
+                self.blue_led.on()
+            case color.PINK:
+                self.blue_led.on()
+                self.blue_led.on()
+            case color.LIGHT_BLUE:
+                self.blue_led.on()
+                self.blue_led.on()
+            case color.WIGHT:
+                self.red_led.on()
+                self.green_led.on()
+                self.blue_led.on()
+
+
+    def update(self):
+        if (mills() - last_time > toggle_time):
+            last_time = mills()
+            self._set_color(
+                (self.front_bit if self.front_bit else self.Color.OFF) 
+                if curently_front_bit 
+                else (self.back_bit if self.back_bit else self.Color.OFF))
+            
+            self.curently_front_bit = not self.curently_front_bit
+            
+# LED colors needed
+# Green - Bin Detected
+# Blue - Filed Tag found
+# Light Blue - Filed Tag far
+# 
+# Green and Blue, if both
+# Green and light blue if both
+    
+# ------------------------------ Tags ------------------------------------------
 # Tag: {"pos": (X, y), "tag": tag2},
 tags = {
-    2: {"pos": (0, 304.8), "heading": 0, "tag": tag2},
-    4: {"pos": (152.4, 609.6), "heading": 270, "tag": tag4},
+    15: {"pos": (0, 304.8), "heading": 0, "tag": Tag()},
+    14: {"pos": (152.4, 609.6), "heading": 270, "tag": Tag()},
+    13: {"pos": (0, 304.8), "heading": 0, "tag": Tag()},
+    12: {"pos": (152.4, 609.6), "heading": 270, "tag": Tag()},
+    11: {"pos": (0, 304.8), "heading": 0, "tag": Tag()},
+    10: {"pos": (152.4, 609.6), "heading": 270, "tag": Tag()},
+    4: {"bin": 1, "tag": Tag()},
 }
 
-loc = Localization(tags)
+field_tags = get_tags_with_pose(tags)
+loc = Localization(field_tags)
 
+led_controller = LED_Controll()
+# ------------------------------ Blob Serch ------------------------------------------
 thresholds = (150, 230)
-
 tag_window = [0, int(c_y-(30 * scale)), int(c_x * 2), int(c_y - 5 * scale)]
 
 while True:
@@ -225,9 +310,10 @@ while True:
     img = sensor.snapshot()
     img.rotation_corr(0, 0, 180)
 
-    box_list = []
-    tag_list = []
+    # box_list = []
+    # tag_list = []
 
+    # # Blob Serch
     # for blob in img.find_blobs(
     #         [thresholds],
     #         pixels_threshold=100,
@@ -235,7 +321,7 @@ while True:
     #         merge=True,
     #         roi=tag_window):
     #     w = min(max(int(blob.w() * 1.2), 10), 160)  # Not too small, not too big.
-    #     h = tag_window[3]  # Not too small, not too big.
+    #     h = tag_window[3]
     #     x = min(max(int(blob.x() + (blob.w() / 4) - (w * 0.1)), 0), img.width() - 1)
     #     y = tag_window[1]
 
@@ -259,9 +345,15 @@ while True:
     # for tag in tag_list:
     #     img.draw_rectangle(tag.rect)
 
-    for tag in img.find_apriltags(fx=f_x, fy=f_y, cx=c_x, cy=c_y):#, roi=tag_window):
-        if tag.id in tags:
-            tags[tag.id]["tag"].update(tag)
+    try: 
+        for tag in img.find_apriltags(fx=f_x, fy=f_y, cx=c_x, cy=c_y, roi=tag_window):
+            if tag.id in tags:
+                tags[tag.id]["tag"].update(tag)
+            if tag.id not in field_tags and in tags:
+                led_controller.found_bin_tag()
+    except (MemoryError):
+        print("memory error")
+        pass
 
     for info in tags.values():
         tag = info["tag"]
@@ -276,6 +368,8 @@ while True:
     # loc.update()
     # if loc.position:
     #     print("X {:.1f}   Y {:.1f}".format(*loc.position))
+
+    led_controller.update()
 
     img.draw_line(int(c_x), 0, int(c_x), int(c_y * 2))
     img.draw_line(0, int(c_y), int(c_x * 2), int(c_y))
